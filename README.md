@@ -1,6 +1,6 @@
 # sunnet
 
-本项目是在 [luopeiyu/million_game_server](https://github.com/luopeiyu/million_game_server) 的 `sunnet` 基础上进行二次开发的 C++/Lua 服务框架实验项目。
+本项目是在 [luopeiyu/million_game_server](https://github.com/luopeiyu/million_game_server) 的 `sunnet` 基础上进行二次开发的 C++/Lua 服务框架实验项目，供大家参考学习。
 
 在已有 C++/Lua 服务框架之上，本项目扩展了 Lua 参数序列化、定时器、Lua coroutine 挂起与恢复、服务间 RPC 调用，以及非阻塞 Socket 写缓冲与优雅关闭能力。
 
@@ -19,7 +19,6 @@
 ```text
 .
 ├── 3rd/lua-5.3.5/   # Lua 5.3.5 源码与静态库
-├── docs/            # 设计与实现记录
 ├── include/         # C++ 头文件
 ├── service/         # Lua 服务脚本
 │   ├── main/
