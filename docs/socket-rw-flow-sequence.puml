@@ -1,0 +1,118 @@
+@startuml
+title socket 读 / 写流程时序
+
+actor "客户端" as Client
+participant "SocketWorker / epoll\nsrc/SocketWorker.cpp" as Sock
+participant "Sunnet\n队列调度" as Sunnet
+participant "Worker线程" as Worker
+participant "Service::OnRWMsg\nsrc/Service.cpp" as Service
+participant "Lua回调/业务脚本" as Lua
+participant "LuaApi::Write\nsrc/LuaApi.cpp" as ApiWrite
+participant "ConnWriter\nsrc/ConnWriter.cpp" as Writer
+
+== 读事件 EPOLLIN ==
+
+Client -> Sock: 发送数据 / 半关闭连接\n触发 EPOLLIN
+Sock -> Sunnet: GetConn(fd)
+Sunnet --> Sock: Conn{type=CLIENT, serviceId}
+Sock -> Sock: OnRW(conn, isRead, isWrite)
+Sock -> Sunnet: Send(serviceId,\nSocketRWMsg{isRead, isWrite, conn})
+Sunnet -> Worker: 目标服务进入 globalQueue
+Worker -> Service: processMsgs(eachNum)
+activate Service
+Service -> Service: OnMsg(SOCKET_RW)\nOnRWMsg(msg)
+
+alt isRead 且连接允许处理读
+    loop read(fd, buff, 512) 直到 len != 512
+        Service -> Client: read(fd, buff, 512)
+        alt len > 0
+            Service -> Lua: lua_pcall\nOnSocketData(fd, buff)
+        else len <= 0
+            Service -> Service: 跳出读循环
+        end
+    end
+
+    alt len <= 0 且 errno != EAGAIN
+        Service -> Service: conn->closed = true
+        Service -> Lua: StartCallbackCoroutine\nOnSocketClose(fd)
+        Service -> Sunnet: Closeconn(fd)
+        Sunnet -> Sunnet: RemoveConn(fd)\nclose(fd)
+        Sunnet -> Sock: RemoveEvent(fd)
+    end
+end
+Service --> Worker: 读事件处理结束
+deactivate Service
+
+note over Service,Lua
+当前 OnSocketData 使用普通 lua_pcall，
+不要在里面直接 sunnet.Sleep / sunnet.Call。
+OnSocketClose 使用 coroutine 回调。
+end note
+
+== 主动写 sunnet.Write ==
+
+Lua -> ApiWrite: sunnet.Write(fd, data)
+activate ApiWrite
+ApiWrite -> ApiWrite: 校验参数\n复制 Lua 字符串到 buff\n读取 selfId
+ApiWrite -> Sunnet: Write(selfId, fd, buff, len)
+Sunnet -> Service: WriteConn(fd, buff, len)
+activate Service
+Service -> Writer: EntireWrite(buff, len)
+activate Writer
+
+alt writer 正在 closing
+    Writer -> Writer: 忽略业务写\n打印日志
+else 写队列为空
+    Writer -> Client: write(fd, buff, len)
+    alt 一次写完
+        Writer -> Writer: 直接返回
+    else 部分写入或 EAGAIN
+        Writer -> Writer: 记录 WriteObject(start, buff, len)
+        Writer -> Sunnet: ModifyEvent(fd, true)
+        Sunnet -> Sock: epoll_ctl(MOD)\nEPOLLIN | EPOLLOUT | EPOLLET
+    end
+else 写队列非空
+    Writer -> Writer: 追加 WriteObject 到队列
+end
+
+Writer --> Service
+deactivate Writer
+Service --> Sunnet: writer 存在则 true\n否则 false
+deactivate Service
+Sunnet --> ApiWrite: ok
+ApiWrite --> Lua: 1 / -1
+deactivate ApiWrite
+
+== 可写事件 EPOLLOUT ==
+
+Sock -> Sock: epoll_wait()\nfd 可写
+Sock -> Sunnet: Send(serviceId,\nSocketRWMsg{isWrite=true, conn})
+Sunnet -> Worker: 目标服务进入 globalQueue
+Worker -> Service: processMsgs(eachNum)
+activate Service
+Service -> Service: OnRWMsg(msg)
+Service -> Lua: OnSocketWritable(fd)
+Lua -> Writer: OnWriteable()
+activate Writer
+
+loop while WriteFrontObj() 成功写完一条
+    Writer -> Client: write(fd, remaining, len)
+    Writer -> Writer: 写完则弹出队首\n未写完/EAGAIN 则保留进度
+end
+
+alt 写队列已空
+    Writer -> Sunnet: ModifyEvent(fd, false)
+    Sunnet -> Sock: epoll_ctl(MOD)\nEPOLLIN | EPOLLET
+
+    alt isClosing
+        Writer -> Client: shutdown(fd, SHUT_RD)
+        Writer -> Sunnet: Send(serviceId,\nSocketRWMsg{isRead=true, isCloseReq=true})
+    end
+end
+
+Writer --> Service
+deactivate Writer
+Service --> Worker: 写事件处理结束
+deactivate Service
+
+@enduml

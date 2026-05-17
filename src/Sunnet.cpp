@@ -113,8 +113,10 @@ void Sunnet::KillService(uint32_t id){
 
     //退出前要执行用户注册的退出函数，
     //但是不要在这里执行
-    //OnExit里面会lua_close，因为killService是通过lua_pcall启动的Lua函数调用的，killService返回到lua层OnService，再返回到c++层的OnService的lua_pcall会导致luaState为空，会导致lua_pcall保存
-    //等从c++的OnService返回到processmsg再执行OnExit
+    //OnExit里面会lua_close，因为killService是通过lua_resume/lua_pcall启动的Lua函数通过LuaApi:KillService调用的
+    //Sunnet::KillService返回后，我们还要从c层返回到到lua层的OnService，
+    //再返回到c层的Service::OnService的lua_pcall/lua_resume会导致luaState为空，导致报错
+    //所以等从c++的OnService返回到processmsg再执行OnExit
     srv->is_Exiting=true;//标记正在退出
 
     pthread_rwlock_wrlock(&serviceLock);
@@ -207,6 +209,9 @@ void Sunnet::checkAndWeakUp(){
 }
 
 void Sunnet::WorkerWait(){
+    //为了性能考虑，这里的条件变量使用方法并不标准
+    //我们没有把队列修改和cond_wait作为原子操作，所以可能会丢失唤醒，
+    //然而send的高频性弥补了这一点，即使某次send唤醒丢失，后续的send会补唤醒
     pthread_mutex_lock(&sleepMtx);
     {
         sleepCount++;

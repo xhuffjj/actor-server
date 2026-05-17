@@ -1,0 +1,67 @@
+@startuml
+title sunnet.Sleep 时序
+
+actor "Lua服务A\n业务协程" as LuaA
+participant "LuaApi::Sleep\nsrc/LuaApi.cpp" as SleepApi
+participant "Service A\nsrc/Service.cpp" as SrvA
+participant "Sunnet\nsrc/Sunnet.cpp" as Sunnet
+participant "TimerWorker\nsrc/TimerWorker.cpp" as TimerW
+participant "Worker线程\nsrc/Worker.cpp" as Worker
+participant "Service::OnTimerMsg\nsrc/Service.cpp" as OnTimer
+
+LuaA -> SleepApi: sunnet.Sleep(ms)
+activate SleepApi
+SleepApi -> SleepApi: 校验参数\n必须在 coroutine 中
+SleepApi -> SrvA: 读取 __service_ptr
+SleepApi -> SrvA: SleepCurrentCoroutine(luaState, ms)
+activate SrvA
+SrvA -> SrvA: NewSession()
+SrvA -> SrvA: lua_pushthread + luaL_ref\nsessionCoRefs[session] = coRef
+
+alt ms >= 0
+    SrvA -> Sunnet: Timeout(serviceId, session, ms)
+    activate Sunnet
+    Sunnet -> Sunnet: timerQueue.push(node)\n必要时 signal timerCond
+    deactivate Sunnet
+else ms < 0
+    SrvA -> SrvA: 仅挂起协程，不注册定时器
+end
+
+SrvA --> SleepApi
+deactivate SrvA
+SleepApi --> LuaA: lua_yield()
+deactivate SleepApi
+
+TimerW -> Sunnet: 等待 timerCond / 轮询超时节点
+activate TimerW
+alt 节点到期
+    TimerW -> Sunnet: Send(serviceId, TimerMsg{session})
+    Sunnet -> SrvA: PushMsg(TimerMsg)
+    Sunnet -> SrvA: 入 globalQueue / checkAndWeakUp()
+else 还未到期
+    TimerW -> TimerW: pthread_cond_timedwait(...)
+end
+
+Worker -> SrvA: processMsgs(eachNum)
+activate Worker
+activate SrvA
+SrvA -> OnTimer: OnTimerMsg(TIMER)
+activate OnTimer
+OnTimer -> OnTimer: sessionCoRefs.find(session)
+alt 找到 session
+    OnTimer -> SrvA: ResumeCoroutineRef(coRef, 0)
+    SrvA -> LuaA: lua_resume\nsunnet.Sleep 之后继续执行
+else 找不到 session
+    OnTimer -> OnTimer: 打日志并返回
+end
+deactivate OnTimer
+deactivate SrvA
+deactivate Worker
+
+note over SleepApi,OnTimer
+Sleep 的核心是:
+先把当前 coroutine 存进 sessionCoRefs，
+再通过 TimerWorker 到期后恢复它。
+end note
+
+@enduml

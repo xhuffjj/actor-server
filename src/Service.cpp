@@ -245,6 +245,8 @@ void Service::OnServiceMsg(std::shared_ptr<ServiceMsg> msg){
         return;
     }
 
+    int top = lua_gettop(luaState);//记录栈顶索引
+
     lua_getglobal(luaState,"OnServiceMsg");
     if(!lua_isfunction(luaState, -1)){
         lua_pop(luaState, 1);
@@ -259,7 +261,7 @@ void Service::OnServiceMsg(std::shared_ptr<ServiceMsg> msg){
     uint8_t argc=(uint8_t)p[0];//参数个数
     p+=1;
 
-    int top = lua_gettop(luaState);//记录栈顶索引
+    
 
     for(uint8_t i=0;i<argc;i++){
         
@@ -461,7 +463,7 @@ int Service::ResumeCoroutineRef(int coRef, int nargs){
     //resume协程
     int status=lua_resume(co,luaState,nargs);
     if(status == LUA_OK){
-        //协程处理rpc完毕，删除rpc上下文
+        //协程处理rpc完毕，删除rpc上下文（如果有）
         coRpcContexts.erase(co);
         luaL_unref(luaState, LUA_REGISTRYINDEX, coRef);
     }else if(status == LUA_YIELD){

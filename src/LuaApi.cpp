@@ -13,7 +13,7 @@ static bool PackValue(lua_State* luaState,int idx,std::string &out,int depth){
           return false;
     }
 
-    idx=lua_absindex(luaState,idx);//固定一下索引，后面递归要用负索引
+    idx=lua_absindex(luaState,idx);//固定一下索引，后面递归会传入负索引
 
     if(lua_isinteger(luaState,idx)){
             out.push_back((char)LuaApi::TYPE_INTEGER);
@@ -46,11 +46,7 @@ static bool PackValue(lua_State* luaState,int idx,std::string &out,int depth){
             lua_pushnil(luaState);
             while (lua_next(luaState,idx)!=0)
             {
-                if(!(lua_isinteger(luaState,-2))&&!(lua_isstring(luaState,-2))){//暂时不支持lua_number作为键
-                    std::cout<<"LuaApi:send failed, table key type not support"<<std::endl;
-                    lua_pop(luaState, 2);
-                    return false;
-                }
+                
                 if(!(PackValue(luaState,-2,out,depth+1))){//递归序列化键
                     lua_pop(luaState,2);
                     return false;
@@ -140,6 +136,7 @@ int LuaApi::KillService(lua_State *luaState){
     }
 
     Sunnet *inst=Sunnet::get_instance();
+    //killservice不要关闭luaState，不然会导致这里返回后对luaState的操作报错
     inst->KillService(target_id);
 
     lua_pushinteger(luaState,1);

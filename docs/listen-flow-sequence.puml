@@ -1,0 +1,67 @@
+@startuml
+title 服务 listen / accept 流程时序
+
+actor "Lua服务\n业务脚本" as Lua
+participant "LuaApi::Listen\nsrc/LuaApi.cpp" as Api
+participant "Sunnet\nsrc/Sunnet.cpp" as Sunnet
+participant "Conn表\nSunnet::Conns" as Conns
+participant "SocketWorker / epoll\nsrc/SocketWorker.cpp" as Sock
+participant "Worker线程" as Worker
+participant "Service\nsrc/Service.cpp" as Service
+participant "Lua回调\nOnAcceptMsg" as LuaCb
+
+== 创建监听 socket ==
+
+Lua -> Api: sunnet.Listen(port)
+activate Api
+Api -> Api: 校验 port\n读取 registry.__service_id(selfId)
+Api -> Sunnet: Listen(port, selfId)
+activate Sunnet
+Sunnet -> Sunnet: socket(AF_INET, SOCK_STREAM)\nfcntl(O_NONBLOCK)\nbind(INADDR_ANY:port)\nlisten(backlog=64)
+
+alt 创建 / 绑定 / 监听失败
+    Sunnet --> Api: -1
+    Api --> Lua: -1
+else 成功
+    Sunnet -> Conns: AddConn(listenfd, selfId, LISTEN)
+    Sunnet -> Sock: AddEvent(listenfd)
+    activate Sock
+    Sock -> Sock: epoll_ctl(ADD)\nEPOLLIN | EPOLLET
+    Sock --> Sunnet
+    deactivate Sock
+    Sunnet --> Api: listenfd
+    deactivate Sunnet
+    Api --> Lua: listenfd
+end
+deactivate Api
+
+== 客户端连接到来 ==
+
+Sock -> Sock: epoll_wait()\nlistenfd 可读
+Sock -> Sunnet: GetConn(listenfd)
+Sunnet --> Sock: Conn{type=LISTEN, serviceId}
+Sock -> Sock: OnAccept(conn)\naccept() 得到 clientfd\nfcntl(clientfd, O_NONBLOCK)
+Sock -> Conns: AddConn(clientfd, serviceId, CLIENT)
+Sock -> Sock: epoll_ctl(ADD clientfd)\nEPOLLIN | EPOLLET
+Sock -> Sunnet: Send(serviceId, SocketAcceptMsg)
+note right of Sunnet
+这里复用普通 Send 投递逻辑：
+目标服务入 msgQueue；
+必要时入 globalQueue 并唤醒 worker。
+end note
+
+Sunnet -> Worker: globalQueue 中取到目标服务
+Worker -> Service: processMsgs(eachNum)
+activate Service
+Service -> Service: OnMsg(SOCKET_ACCEPT)\nOnAcceptMsg(msg)
+Service -> Sunnet: GetConn(clientfd)
+Sunnet --> Service: Conn{type=CLIENT}
+Service -> Service: 创建 ConnWriter\nwriters[clientfd] = writer
+Service -> LuaCb: StartCallbackCoroutine\nOnAcceptMsg(listenfd, clientfd)
+activate LuaCb
+LuaCb --> Service: LUA_OK 或 LUA_YIELD
+deactivate LuaCb
+Service --> Worker: 本轮处理结束
+deactivate Service
+
+@enduml

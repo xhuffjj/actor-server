@@ -1,0 +1,89 @@
+@startuml
+title sunnet.Send 普通服务消息时序
+
+actor "Lua服务A\n业务脚本" as LuaA
+participant "LuaApi::Send\nsrc/LuaApi.cpp" as Api
+participant "Sunnet\nsrc/Sunnet.cpp" as Sunnet
+participant "目标Service B\nService::msgQueue" as SrvB
+participant "Worker线程\nsrc/Worker.cpp" as Worker
+participant "Service::OnServiceMsg\nsrc/Service.cpp" as OnMsg
+participant "Lua服务B\nOnServiceMsg" as LuaB
+
+LuaA -> Api: sunnet.Send(target, ...)
+activate Api
+Api -> Api: 校验参数数量与 target 类型
+
+alt target 是服务名
+    Api -> Sunnet: QueryName(name)
+    Sunnet --> Api: targetId / -1
+else target 是服务 id
+    Api -> Api: targetId = lua_tointeger(1)
+end
+
+Api -> Api: 从 registry 读取 __service_id(selfId)
+
+loop 每个 Lua 参数
+    Api -> Api: PackValue(...)\n序列化 integer/number/string/table
+end
+
+Api -> Api: 构造 ServiceMsg\n type=SERVICE, kind=SEND\n sourse=selfId, session=0
+Api -> Sunnet: Send(targetId, msg)
+activate Sunnet
+Sunnet -> Sunnet: GetService(targetId)
+
+alt 目标服务不存在
+    Sunnet --> Api: false\n打印 send failed
+    Api --> LuaA: 无返回值
+else 找到目标服务
+    Sunnet -> SrvB: PushMsg(msg)
+    activate SrvB
+    SrvB -> SrvB: queueLock 保护入 msgQueue
+    SrvB --> Sunnet
+    deactivate SrvB
+
+    Sunnet -> SrvB: 检查 inGlobal
+    alt Service B 未在 globalQueue
+        Sunnet -> Sunnet: PushGlobalQueue(SrvB)\n设置 inGlobal=true
+        Sunnet -> Sunnet: checkAndWeakUp()
+    else 已在 globalQueue
+        Sunnet -> Sunnet: 不重复入全局队列
+    end
+
+    Sunnet --> Api: true
+    deactivate Sunnet
+    Api --> LuaA: 返回 0 个 Lua 值\nSend 异步完成
+    deactivate Api
+
+    Worker -> Sunnet: PopGlobalQueue()
+    activate Worker
+    Sunnet --> Worker: Service B
+    Worker -> SrvB: processMsgs(eachNum)
+    activate SrvB
+    SrvB -> SrvB: PopMsg()
+    SrvB -> OnMsg: OnMsg(msg)
+    activate OnMsg
+    OnMsg -> OnMsg: type == SERVICE\nkind != RET
+    OnMsg -> LuaB: StartCallbackCoroutine\nOnServiceMsg(session=0, source, ...)
+    activate LuaB
+    LuaB --> OnMsg: LUA_OK 或 LUA_YIELD
+    deactivate LuaB
+    OnMsg --> SrvB
+    deactivate OnMsg
+    SrvB --> Worker: 本轮处理结束
+    deactivate SrvB
+
+    Worker -> Worker: CheckAndPutGlobal(SrvB)
+    alt B 队列仍有消息
+        Worker -> Sunnet: PushGlobalQueue(SrvB)
+    else B 队列为空
+        Worker -> SrvB: SetInGlobal(false)
+    end
+    deactivate Worker
+end
+
+note over Api,OnMsg
+普通 Send: kind=SEND, session=0, 不等待返回。
+CALL/RET 复用 ServiceMsg，但会设置 kind/session 并走协程挂起/恢复。
+end note
+
+@enduml

@@ -293,7 +293,7 @@ sunnet.CloseConn(fd)
 | `string` | 4 字节长度 + 字符串内容 |
 | `table` | 4 字节键值对数量 + key/value 递归序列化 |
 
-`table` 的 key 当前支持 `integer` 和 `string`，value 支持上述已支持类型。序列化递归深度限制为 32。
+`table` 的 key 和 value 都支持上述已支持类型，并按当前序列化规则递归处理。序列化递归深度限制为 32。
 
 服务消息类型：
 

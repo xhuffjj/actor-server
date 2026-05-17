@@ -1,0 +1,97 @@
+@startuml
+title sunnet.Call / sunnet.Ret 时序
+
+actor "Lua服务A\n调用方协程" as LuaA
+participant "LuaApi::Call\nsrc/LuaApi.cpp" as CallApi
+participant "Service A\nsrc/Service.cpp" as SrvA
+participant "Sunnet\nsrc/Sunnet.cpp" as Sunnet
+participant "目标Service B\nmsgQueue" as SrvB
+participant "Worker线程\nsrc/Worker.cpp" as Worker
+participant "Service::OnServiceMsg\nsrc/Service.cpp" as OnMsgB
+participant "Lua服务B\nOnServiceMsg coroutine" as LuaB
+participant "LuaApi::Ret\nsrc/LuaApi.cpp" as RetApi
+participant "Service::OnRetMsg\nsrc/Service.cpp" as OnRetA
+
+LuaA -> CallApi: sunnet.Call(target, ...)
+activate CallApi
+CallApi -> CallApi: 校验参数\n必须在 coroutine 中
+
+alt target 是服务名
+    CallApi -> Sunnet: QueryName(name)
+    Sunnet --> CallApi: targetId / -1
+else target 是服务 id
+    CallApi -> CallApi: targetId = lua_tointeger(1)
+end
+
+CallApi -> CallApi: 读取 __service_ptr
+CallApi -> CallApi: 序列化参数 PackValue(...)
+CallApi -> SrvA: SleepCurrentCoroutine(luaState, -1)
+activate SrvA
+SrvA -> SrvA: NewSession()
+SrvA -> SrvA: lua_pushthread + luaL_ref\nsessionCoRefs[session] = coRef
+SrvA --> CallApi
+deactivate SrvA
+
+CallApi -> CallApi: 构造 ServiceMsg\nkind=CALL, session=session
+CallApi -> Sunnet: Send(targetId, msg)
+activate Sunnet
+Sunnet -> SrvB: PushMsg(msg)
+Sunnet -> SrvB: 入 globalQueue / checkAndWeakUp()
+
+alt 目标服务不存在或发送失败
+    Sunnet --> CallApi: false
+    CallApi -> SrvA: 清理 sessionCoRefs[session]
+    CallApi --> LuaA: luaL_error("sunnet.Call send failed")
+    deactivate Sunnet
+    deactivate CallApi
+else 发送成功
+    Sunnet --> CallApi: true
+    deactivate Sunnet
+    CallApi --> LuaA: lua_yield()
+    deactivate CallApi
+
+    Worker -> SrvB: processMsgs(eachNum)
+    activate Worker
+    activate SrvB
+    SrvB -> OnMsgB: OnServiceMsg(CALL)
+    activate OnMsgB
+    OnMsgB -> OnMsgB: kind == CALL\n准备 RpcContext
+    OnMsgB -> LuaB: StartCallbackCoroutine(..., RpcContext)
+    activate LuaB
+    LuaB -> RetApi: sunnet.Ret(...)
+    activate RetApi
+    RetApi -> RetApi: 读取 __service_ptr\n查 coRpcContexts[current co]
+    RetApi -> RetApi: 序列化返回值
+    RetApi -> Sunnet: Send(sourceId, RET msg)
+    Sunnet -> SrvA: PushMsg(msg)
+    Sunnet -> SrvA: 入 globalQueue / checkAndWeakUp()
+    RetApi --> LuaB: return 0
+    deactivate RetApi
+    deactivate LuaB
+    OnMsgB --> SrvB
+    deactivate OnMsgB
+    deactivate SrvB
+    deactivate Worker
+
+    Worker -> SrvA: processMsgs(eachNum)
+    activate Worker
+    activate SrvA
+    SrvA -> OnRetA: OnRetMsg(RET)
+    activate OnRetA
+    OnRetA -> OnRetA: sessionCoRefs.find(session)
+    OnRetA -> OnRetA: lua_rawgeti 取回 coRef
+    OnRetA -> OnRetA: UnpackValue(...) 压回返回值
+    OnRetA -> SrvA: ResumeCoroutineRef(coRef, argc)
+    SrvA -> LuaA: lua_resume\nsunnet.Call 返回
+    deactivate OnRetA
+    deactivate SrvA
+    deactivate Worker
+end
+
+note over CallApi,OnRetA
+CALL / RET 复用 ServiceMsg:
+kind=CALL 表示请求，kind=RET 表示回复。
+session 用来把返回值对应回 caller coroutine。
+end note
+
+@enduml

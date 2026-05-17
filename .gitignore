@@ -1,5 +1,12 @@
 build/
 docs/
+!docs/
+docs/*
+!docs/send-flow-sequence.puml
+!docs/listen-flow-sequence.puml
+!docs/socket-rw-flow-sequence.puml
+!docs/call-flow-sequence.puml
+!docs/sleep-flow-sequence.puml
 .vscode/
 .agents/
 .codex/
